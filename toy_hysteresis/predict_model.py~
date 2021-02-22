@@ -15,7 +15,7 @@ class HysteresisExact(gpytorch.models.ExactGP):
 
         #register parameters
         self.register_parameter('mu', torch.nn.parameter.Parameter(0.1 * torch.ones(2)))
-        self.register_parameter('cov_diag',torch.nn.parameter.Parameter(1.5 * torch.ones(2)))
+        self.register_parameter('cov_diag',torch.nn.parameter.Parameter(0.1 * torch.ones(2)))
 
         #lengthscale constraint
         #lconstr = gpytorch.constraints.Interval(0.0,1.0)
@@ -24,6 +24,8 @@ class HysteresisExact(gpytorch.models.ExactGP):
         self.covar_module = gpytorch.kernels.ScaleKernel(
             gpytorch.kernels.RBFKernel())
 
+        #self.covar_module.base_kernel.raw_lengthscale.requires_grad = False
+        
         self.pmodel = pmodel
         
         self.first_run = True
@@ -39,7 +41,10 @@ class HysteresisExact(gpytorch.models.ExactGP):
         covar = self.covar_module(B)
 
         return gpytorch.distributions.MultivariateNormal(mean, covar)
-            
+
+    def predict_next_step(self, x):
+        pass
+    
         
 def quad_focusing(K):
     return (K - 0.25)**2
@@ -48,8 +53,8 @@ def main():
     t, current, pmodel = generator.generate_magnetization_model(100)
 
     #create hysterion density object
-    mu = torch.zeros(2) + 0.5
-    cov = torch.tensor(((1.0,0.0),(0.0,0.75)))
+    mu = torch.tensor((0.25,0.5))
+    cov = torch.tensor(((0.15,0.0),(0.0,0.35)))
     hdens = densities.MultiVariateNormal(mu, cov)
 
     #generate magnetization response
@@ -58,25 +63,29 @@ def main():
     #plot magnet response
     fig,ax = plt.subplots()
     #ax.plot(current, response)
-    ax.plot(t, response)
+    #ax.plot(t, response)
 
-    #plot beam response
-    fig2, ax2 = plt.subplots(2,1)
-    sigma = quad_focusing(response)
-    ax2[0].plot(current, sigma, 'C1+')
-    ax2[1].plot(response, sigma, '+')
+    sigma = quad_focusing(response) + torch.randn(response.shape) * 0.1**2
 
 
     #create and fit model
-    train_x = torch.from_numpy(current).reshape(-1,1)
-    train_y = sigma
+    #Note: train only on the first 80 points
+    n_train = 25
+    train_x = torch.from_numpy(current[:n_train]).reshape(-1,1)
+    train_y = sigma[:n_train]
+
+    ax.plot(train_x, train_y)
+    
+    test_x = torch.from_numpy(current).reshape(-1,1)
+    test_y = sigma
+    
     
     lk = gpytorch.likelihoods.GaussianLikelihood()
     gp_model = HysteresisExact(train_x, train_y, lk, pmodel)
 
-    
-    train_model(gp_model, lk, train_x, train_y, iter_steps = 200,lr = 0.1)
-
+    #train and/or load model
+    train_model(gp_model, lk, train_x, train_y, iter_steps = 300,lr = 0.1)
+    gp_model.load_state_dict(torch.load('model.pth'))
     
     #evaluate model
     gp_model.eval()
@@ -84,15 +93,22 @@ def main():
     #test_x = torch.linspace(0.,1.,50).reshape(-1,1)
 
     print(gp_model.state_dict())
-    print(gp_model(train_x))
     with torch.no_grad():
-        pred = lk(gp_model(train_x))
+        pred = lk(gp_model(test_x))
 
     mean = pred.mean.detach()
     lower, upper = pred.confidence_region()
 
-    ax2[0].plot(train_x, mean)
-    ax2[0].fill_between(train_x.flatten(), lower.detach(), upper.detach(), lw = 0, alpha = 0.25)
+    #plot beam response
+    fig2, ax2 = plt.subplots(2,1)
+    ax2[0].plot(test_x, test_y, 'C1+')
+    ax2[1].plot(response, sigma, '+')
+
+    
+    ax2[0].plot(test_x, mean)
+    ax2[0].fill_between(test_x.flatten(), lower.detach(), upper.detach(), lw = 0, alpha = 0.25)
+
+
     
 def train_model(model, likelihood, x, y, iter_steps = 250, lr = 0.1):    
     # Find optimal model hyperparameters
@@ -123,6 +139,7 @@ def train_model(model, likelihood, x, y, iter_steps = 250, lr = 0.1):
     #set model params to the best
     model.load_state_dict(best_param)
 
+    torch.save(model.state_dict(), 'model.pth')
     
 main()
 plt.show()
