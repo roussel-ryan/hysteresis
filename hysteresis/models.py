@@ -63,26 +63,56 @@ class HysteresisExact(gpytorch.models.ExactGP):
 
         self.hyst_module = hyst_module
         
+
         
     def forward(self, x):        
+        '''
+        NOTE: remember that the argument passed to x here is a union between training and test data
+              when self.training = False
+        - we need to re-do the hysteresis model (call calculate_magnetization) for the training data
+          but when we predict future values we need to call predict_magnetization
+
+        '''        
         if self.training:
             B = self.hyst_module(x)
         else:
-            B = self.hyst_module.predict(x).float()
-        
+            #note: to allow batch training self.train_inputs is a tuple of tensors, need first index
+            # not the case for passing x!
+            n_train = self.train_inputs[0].shape[0]
+            #print(f'x:{x}')
+
+            B_train = self.hyst_module(x[:n_train])
+            #print(f'B_train:{B_train}')
+            
+            B_test = self.hyst_module.predict(x[n_train:]).float()
+            #print(f'B_test:{B_test}')
+            
+            #concat
+            B = torch.cat((B_train, B_test),axis = 0)
+            #print(f'B:{B}')
+            
         mean = self.mean_module(B)
         covar = self.covar_module(B)
 
         return gpytorch.distributions.MultivariateNormal(mean, covar)
 
-    def predict(self, x):
-        B = self.hyst_module.predict(x)
-        print(B)
-        mean = self.mean_module(B)
-        covar = self.covar_module(B)
+    def get_manifold_model(self):
+        #from this model create a copy GP that predicts from manifold space, not input space
 
-        return gpytorch.distributions.MultivariateNormal(mean, covar)
-        
+        #get manifold inputs and outputs
+        #note will not work for batch mode!
+        manifold_inputs = self.hyst_module(self.train_inputs[0])
+        manifold_outputs = self.train_targets
+
+        #define new model - use deep copies so modifications to new model do not change orig model
+        manifold_lk = copy.deepcopy(self.likelihood)
+        manifold_model = ExactGP(manifold_inputs, manifold_outputs, manifold_lk)
+
+        #set model cov and mean function to copy
+        manifold_model.mean_module = copy.deepcopy(self.mean_module)
+        manifold_model.covar_module = copy.deepcopy(self.covar_module)
+
+        return manifold_model
         
 class ExactGP(gpytorch.models.ExactGP):
     def __init__(self, train_x, train_y, lk):
